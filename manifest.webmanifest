@@ -3,7 +3,7 @@
   "name": "Konverter Gambar",
   "short_name": "Konverter",
   "lang": "id",
-  "start_url": "./?app=v2",
+  "start_url": "./?app=v3",
   "scope": "./",
   "display": "standalone",
   "orientation": "any",
