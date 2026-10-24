@@ -81,85 +81,153 @@ li a{font-weight:600;font-size:.9rem;color:var(--ac);text-decoration:none;paddin
   </div>
   <div class="prog" id="prog"><i></i></div>
   <ul id="list"></ul>
-  <p class="sub" style="margin-top:24px;font-size:.8rem">Versi 8</p>
+  <p class="sub" style="margin-top:24px;font-size:.8rem">Versi 10</p>
 </main>
 
 <script>
 (function(){
-  var items=[], fmt="image/webp", ext="webp", quality=.85, gen=0;
+  var items=[], fmt="image/webp", ext="webp", quality=.85, gen=0, uid=0;
   var list=document.getElementById("list"), sum=document.getElementById("sum");
   var zipBtn=document.getElementById("zip"), clrBtn=document.getElementById("clr");
   var prog=document.getElementById("prog"), bar=prog.firstElementChild;
-  var POOL=Math.max(2,Math.min(8,(navigator.hardwareConcurrency||4)));
+  var BUDGET=8*1048576, CHUNK=120*1048576;
 
   function fmtSize(n){return n<1024?n+" B":n<1048576?(n/1024).toFixed(0)+" KB":(n/1048576).toFixed(1)+" MB"}
   function baseName(n){return n.replace(/\.[^.]+$/,"")||"gambar"}
+  function pause(ms){return new Promise(function(r){setTimeout(r,ms||0)})}
 
-  function toBlob(bmp){
+  // Hasil konversi disimpan di IndexedDB (disk), bukan di RAM
+  var dbp=null;
+  function db(){
+    if(!dbp)dbp=new Promise(function(res,rej){
+      try{var r=indexedDB.open("konverter",1);
+        r.onupgradeneeded=function(){r.result.createObjectStore("o")};
+        r.onsuccess=function(){res(r.result)};r.onerror=function(){rej(r.error)};
+      }catch(e){rej(e)}
+    });
+    return dbp;
+  }
+  function tx(mode,fn){
+    return db().then(function(d){return new Promise(function(res,rej){
+      var t=d.transaction("o",mode),q=fn(t.objectStore("o"));
+      t.oncomplete=function(){res(q&&q.result)};t.onerror=t.onabort=function(){rej(t.error)};
+    })});
+  }
+  async function saveOut(it,b){
+    it.size=b.size;
+    try{await tx("readwrite",function(s){return s.put(b,it.id)});it.mem=null}
+    catch(e){it.mem=b}
+  }
+  async function getOut(it){
+    if(it.mem)return it.mem;
+    return tx("readonly",function(s){return s.get(it.id)});
+  }
+  function wipe(){return tx("readwrite",function(s){return s.clear()}).catch(function(){})}
+  wipe();
+
+  async function toBlob(bmp){
     var w=bmp.width,h=bmp.height,c,ctx;
     if(typeof OffscreenCanvas!=="undefined"){c=new OffscreenCanvas(w,h)}
     else{c=document.createElement("canvas");c.width=w;c.height=h}
     ctx=c.getContext("2d");
     if(fmt==="image/jpeg"){ctx.fillStyle="#fff";ctx.fillRect(0,0,w,h)}
     ctx.drawImage(bmp,0,0);
-    var q=fmt==="image/png"?undefined:quality;
-    if(c.convertToBlob)return c.convertToBlob({type:fmt,quality:q});
-    return new Promise(function(res){c.toBlob(res,fmt,q)});
+    var q=fmt==="image/png"?undefined:quality, b;
+    if(c.convertToBlob)b=await c.convertToBlob({type:fmt,quality:q});
+    else b=await new Promise(function(res){c.toBlob(res,fmt,q)});
+    c.width=c.height=0;
+    return b;
+  }
+
+  async function makeThumb(bmp){
+    var s=88/Math.max(bmp.width,bmp.height,1),w=Math.max(1,Math.round(bmp.width*s)),h=Math.max(1,Math.round(bmp.height*s));
+    var c=document.createElement("canvas");c.width=w;c.height=h;
+    c.getContext("2d").drawImage(bmp,0,0,w,h);
+    var b=await new Promise(function(res){c.toBlob(res,"image/jpeg",.7)});
+    c.width=c.height=0;
+    return b?URL.createObjectURL(b):null;
   }
 
   async function convert(it,g){
-    it.state="work";it.out=null;render(it);
+    var bmp=null;
+    it.state="work";render(it);
     try{
-      var bmp=await createImageBitmap(it.file);
+      bmp=await createImageBitmap(it.file);
+      if(!it.thumb)it.thumb=await makeThumb(bmp);
       var b=await toBlob(bmp);
-      if(bmp.close)bmp.close();
       if(g!==gen)return;
       if(!b||b.type!==fmt)throw new Error("Format tidak didukung browser ini");
-      it.out=b;it.state="ok";
+      await saveOut(it,b);
+      it.state="ok";
     }catch(e){
       if(g!==gen)return;
       it.state="err";it.msg=(e&&e.message)||"Gagal dibaca";
+    }finally{
+      if(bmp&&bmp.close)bmp.close();
     }
     render(it);
   }
 
+  // Penjadwal: sedikit file sekaligus, dibatasi total ukuran file yang sedang diproses
   async function run(){
-    var g=++gen, queue=items.slice(), done=0, total=queue.length;
+    var g=++gen, queue=items.slice(), total=queue.length, done=0, active=0, inflight=0;
     if(!total){updateUI();return}
     prog.style.visibility="visible";bar.style.width="0";
-    items.forEach(function(it){it.state="wait";render(it)});
-    async function worker(){
-      while(queue.length&&g===gen){
-        var it=queue.shift();
-        await convert(it,g);
-        if(g===gen){done++;bar.style.width=(done/total*100)+"%";updateUI()}
+    items.forEach(function(it){it.state="wait";it.size=0;render(it)});
+    updateUI();
+    await new Promise(function(resolve){
+      function start(it){
+        var sz=it.file.size;active++;inflight+=sz;
+        convert(it,g).then(function(){
+          active--;inflight-=sz;
+          if(g===gen){done++;bar.style.width=(done/total*100)+"%";updateUI()}
+          return pause(0);
+        }).then(pump);
       }
-    }
-    var ws=[];for(var i=0;i<Math.min(POOL,total);i++)ws.push(worker());
-    await Promise.all(ws);
+      function pump(){
+        if(g!==gen){if(!active)resolve();return}
+        while(queue.length){
+          var it=queue[0];
+          if(active>0&&(active>=2||inflight+it.file.size>BUDGET))break;
+          start(queue.shift());
+        }
+        if(!queue.length&&!active)resolve();
+      }
+      pump();
+    });
     if(g===gen){setTimeout(function(){if(g===gen)prog.style.visibility="hidden"},400);updateUI()}
   }
 
   function outName(it){return baseName(it.file.name)+"."+ext}
 
+  function saveBlob(blob,name){
+    var u=URL.createObjectURL(blob),a=document.createElement("a");
+    a.href=u;a.download=name;document.body.appendChild(a);a.click();a.remove();
+    setTimeout(function(){URL.revokeObjectURL(u)},8000);
+  }
+
   function render(it){
     if(!it.li){
       it.li=document.createElement("li");
       it.li.innerHTML='<img alt=""><div class="in"><div class="nm"></div><div class="st"></div></div>';
-      it.li.querySelector("img").src=it.thumb;
       it.li.querySelector(".nm").textContent=it.file.name;
       list.appendChild(it.li);
     }
     var st=it.li.querySelector(".st"),a=it.li.querySelector("a");
+    if(it.thumb&&!it.thumbSet){it.li.querySelector("img").src=it.thumb;it.thumbSet=1}
     st.className="st";
     if(it.state==="ok"){
-      var d=Math.round((1-it.out.size/it.file.size)*100);
+      var d=Math.round((1-it.size/it.file.size)*100);
       st.className="st ok";
-      st.textContent=fmtSize(it.file.size)+" ke "+fmtSize(it.out.size)+(d>0?" (hemat "+d+"%)":"");
-      if(!a){a=document.createElement("a");it.li.appendChild(a)}
-      if(it.url)URL.revokeObjectURL(it.url);
-      it.url=URL.createObjectURL(it.out);
-      a.href=it.url;a.download=outName(it);a.textContent="Unduh";
+      st.textContent=fmtSize(it.file.size)+" ke "+fmtSize(it.size)+(d>0?" (hemat "+d+"%)":"");
+      if(!a){
+        a=document.createElement("a");a.href="#";a.textContent="Unduh";
+        a.addEventListener("click",async function(ev){
+          ev.preventDefault();
+          var b=await getOut(it);if(b)saveBlob(b,outName(it));
+        });
+        it.li.appendChild(a);
+      }
     }else{
       if(a)a.remove();
       if(it.state==="err"){st.className="st er";st.textContent=it.msg}
@@ -177,12 +245,11 @@ li a{font-weight:600;font-size:.9rem;color:var(--ac);text-decoration:none;paddin
     var n=0;
     Array.prototype.forEach.call(files,function(f){
       if(!/^image\//.test(f.type)&&!/\.(heic|heif)$/i.test(f.name))return;
-      items.push({file:f,thumb:URL.createObjectURL(f),state:"wait"});n++;
+      items.push({id:++uid,file:f,thumb:null,state:"wait",size:0});n++;
     });
     if(n)run();
   }
 
-  // Pilih format dan kualitas
   var fb=document.querySelectorAll("#fmt button");
   Array.prototype.forEach.call(fb,function(b){
     b.addEventListener("click",function(){
@@ -198,7 +265,6 @@ li a{font-weight:600;font-size:.9rem;color:var(--ac);text-decoration:none;paddin
     clearTimeout(qt);qt=setTimeout(run,250);
   });
 
-  // Letakkan file
   var drop=document.getElementById("drop"),pick=document.getElementById("pick");
   pick.addEventListener("change",function(){add(pick.files);pick.value=""});
   ["dragenter","dragover"].forEach(function(e){drop.addEventListener(e,function(ev){ev.preventDefault();drop.classList.add("on")})});
@@ -208,43 +274,62 @@ li a{font-weight:600;font-size:.9rem;color:var(--ac);text-decoration:none;paddin
   window.addEventListener("drop",function(e){e.preventDefault();if(e.target!==drop&&!drop.contains(e.target))add(e.dataTransfer.files)});
 
   clrBtn.addEventListener("click",function(){
-    gen++;items.forEach(function(i){URL.revokeObjectURL(i.thumb);if(i.url)URL.revokeObjectURL(i.url)});
-    items=[];list.innerHTML="";prog.style.visibility="hidden";updateUI();
+    gen++;items.forEach(function(i){if(i.thumb)URL.revokeObjectURL(i.thumb)});
+    items=[];list.innerHTML="";prog.style.visibility="hidden";updateUI();wipe();
   });
 
-  // ZIP tanpa kompresi (gambar sudah terkompresi), jadi sangat cepat
+  // ZIP tanpa kompresi, dipecah per ~120 MB agar tidak membebani memori
   var T=new Uint32Array(256);
   for(var n=0;n<256;n++){var c=n;for(var k=0;k<8;k++)c=c&1?0xEDB88320^(c>>>1):c>>>1;T[n]=c>>>0}
   function crc(u){var c=-1;for(var i=0;i<u.length;i++)c=T[(c^u[i])&255]^(c>>>8);return(c^-1)>>>0}
 
-  zipBtn.addEventListener("click",async function(){
-    zipBtn.disabled=true;
-    var enc=new TextEncoder(),parts=[],cd=[],off=0,used={};
-    var ready=items.filter(function(i){return i.state==="ok"});
-    if(ready.length===1){var a=ready[0].li.querySelector("a");a.click();updateUI();return}
-    for(var i=0;i<ready.length;i++){
-      var it=ready[i],nm=outName(it),base=baseName(nm),cnt=used[nm]||0;
-      used[nm]=cnt+1;if(cnt)nm=base+" ("+cnt+")."+ext;
-      var data=new Uint8Array(await it.out.arrayBuffer()),nb=enc.encode(nm),cr=crc(data);
+  async function buildZip(group,used){
+    var enc=new TextEncoder(),parts=[],cd=[],off=0;
+    for(var i=0;i<group.length;i++){
+      var it=group[i],blob=await getOut(it),nm=outName(it),cnt=used[nm]||0;
+      used[nm]=cnt+1;if(cnt)nm=baseName(nm)+" ("+cnt+")."+ext;
+      var size=blob.size,nb=enc.encode(nm),cr=crc(new Uint8Array(await blob.arrayBuffer()));
       var lh=new DataView(new ArrayBuffer(30));
       lh.setUint32(0,0x04034b50,true);lh.setUint16(4,20,true);lh.setUint16(6,0x0800,true);
-      lh.setUint32(14,cr,true);lh.setUint32(18,data.length,true);lh.setUint32(22,data.length,true);lh.setUint16(26,nb.length,true);
-      parts.push(lh.buffer,nb,data);
+      lh.setUint32(14,cr,true);lh.setUint32(18,size,true);lh.setUint32(22,size,true);lh.setUint16(26,nb.length,true);
+      parts.push(lh.buffer,nb,blob);
       var ch=new DataView(new ArrayBuffer(46));
       ch.setUint32(0,0x02014b50,true);ch.setUint16(4,20,true);ch.setUint16(6,20,true);ch.setUint16(8,0x0800,true);
-      ch.setUint32(16,cr,true);ch.setUint32(20,data.length,true);ch.setUint32(24,data.length,true);ch.setUint16(28,nb.length,true);ch.setUint32(42,off,true);
+      ch.setUint32(16,cr,true);ch.setUint32(20,size,true);ch.setUint32(24,size,true);ch.setUint16(28,nb.length,true);ch.setUint32(42,off,true);
       cd.push(ch.buffer,nb);
-      off+=30+nb.length+data.length;
+      off+=30+nb.length+size;
     }
     var cdSize=0;cd.forEach(function(p){cdSize+=p.byteLength});
     var end=new DataView(new ArrayBuffer(22));
-    end.setUint32(0,0x06054b50,true);end.setUint16(8,ready.length,true);end.setUint16(10,ready.length,true);
+    end.setUint32(0,0x06054b50,true);end.setUint16(8,group.length,true);end.setUint16(10,group.length,true);
     end.setUint32(12,cdSize,true);end.setUint32(16,off,true);
-    var blob=new Blob(parts.concat(cd,[end.buffer]),{type:"application/zip"});
-    var u=URL.createObjectURL(blob),a2=document.createElement("a");
-    a2.href=u;a2.download="gambar-"+ext+".zip";document.body.appendChild(a2);a2.click();a2.remove();
-    setTimeout(function(){URL.revokeObjectURL(u)},4000);
-    updateUI();
+    return new Blob(parts.concat(cd,[end.buffer]),{type:"application/zip"});
+  }
+
+  zipBtn.addEventListener("click",async function(){
+    var ready=items.filter(function(i){return i.state==="ok"});
+    if(!ready.length)return;
+    zipBtn.disabled=true;
+    try{
+      if(ready.length===1){var b=await getOut(ready[0]);if(b)saveBlob(b,outName(ready[0]));return}
+      var groups=[],cur=[],acc=0;
+      ready.forEach(function(it){
+        if(cur.length&&acc+it.size>CHUNK){groups.push(cur);cur=[];acc=0}
+        cur.push(it);acc+=it.size;
+      });
+      if(cur.length)groups.push(cur);
+      var used={};
+      for(var i=0;i<groups.length;i++){
+        sum.textContent="Membuat ZIP "+(i+1)+" dari "+groups.length+"…";
+        var zb=await buildZip(groups[i],used);
+        saveBlob(zb,"gambar-"+ext+(groups.length>1?"-"+(i+1):"")+".zip");
+        await pause(900);
+      }
+    }catch(e){
+      sum.textContent="ZIP gagal dibuat. Coba unduh satuan.";
+    }finally{
+      zipBtn.disabled=false;updateUI();
+    }
   });
 })();
 </script>
