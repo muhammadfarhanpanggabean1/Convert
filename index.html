@@ -55,6 +55,9 @@ li a{font-weight:600;font-size:.9rem;color:var(--ac);text-decoration:none;paddin
   <h1>Konverter Gambar</h1>
   <p class="sub">JPG, PNG, dan WebP. Berjalan di perangkatmu; file tidak diunggah ke mana pun.</p>
 
+  <div class="bar" id="inst" style="display:none;margin-top:0"><button class="btn" id="instBtn">Pasang aplikasi</button></div>
+  <p class="sub" id="instMsg" style="font-size:.85rem"></p>
+
   <label id="drop">
     <input id="pick" type="file" accept="image/*,application/octet-stream" multiple>
     <strong>Letakkan banyak gambar di sini</strong>
@@ -78,7 +81,7 @@ li a{font-weight:600;font-size:.9rem;color:var(--ac);text-decoration:none;paddin
   </div>
   <div class="prog" id="prog"><i></i></div>
   <ul id="list"></ul>
-  <p class="sub" style="margin-top:24px;font-size:.8rem">Versi 7</p>
+  <p class="sub" style="margin-top:24px;font-size:.8rem">Versi 8</p>
 </main>
 
 <script>
@@ -243,6 +246,19 @@ li a{font-weight:600;font-size:.9rem;color:var(--ac);text-decoration:none;paddin
     setTimeout(function(){URL.revokeObjectURL(u)},4000);
     updateUI();
   });
+})();
+</script>
+<script>
+(function(){
+  var dp=null,inst=document.getElementById("inst"),msg=document.getElementById("instMsg");
+  var standalone=matchMedia("(display-mode: standalone)").matches||navigator.standalone;
+  window.addEventListener("beforeinstallprompt",function(e){e.preventDefault();dp=e;inst.style.display="flex";msg.textContent=""});
+  document.getElementById("instBtn").addEventListener("click",async function(){
+    if(!dp)return;dp.prompt();try{await dp.userChoice}catch(_){}dp=null;inst.style.display="none";
+  });
+  window.addEventListener("appinstalled",function(){inst.style.display="none";msg.textContent="Aplikasi terpasang."});
+  if(standalone){msg.textContent="Berjalan sebagai aplikasi."}
+  else setTimeout(function(){if(!dp)msg.textContent="Chrome belum menawarkan pemasangan. Kemungkinan Chrome masih menganggap app ini sudah terpasang."},3000);
 })();
 </script>
 <script>
