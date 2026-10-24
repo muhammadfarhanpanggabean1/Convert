@@ -45,6 +45,10 @@ li img{width:44px;height:44px;border-radius:8px;object-fit:cover;background:var(
 .nm{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-weight:600;font-size:.95rem}
 .st{font-size:.82rem;color:var(--mut)}
 .st.ok{color:var(--ok)}.st.er{color:var(--er)}
+.fn{font-size:.75rem;color:var(--mut);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.mv{display:flex;flex-direction:column;gap:3px;flex:none}
+.mv button{border:1px solid var(--bd);background:var(--card);color:var(--mut);border-radius:6px;width:34px;height:24px;font-size:.7rem;line-height:1;padding:0;cursor:pointer}
+.mv button:disabled{opacity:.3;cursor:default}
 li a{font-weight:600;font-size:.9rem;color:var(--ac);text-decoration:none;padding:6px}
 .prog{height:3px;background:var(--bd);border-radius:2px;margin-top:14px;overflow:hidden;visibility:hidden}
 .prog i{display:block;height:100%;width:0;background:var(--ac);transition:width .1s}
@@ -73,15 +77,23 @@ li a{font-weight:600;font-size:.9rem;color:var(--ac);text-decoration:none;paddin
     <label class="q" id="qw">Kualitas <input id="q" type="range" min="40" max="100" value="85"> <span id="qv">85</span></label>
   </div>
 
+  <div class="bar" style="margin-top:0;align-items:flex-start;flex-direction:column;gap:4px">
+    <label for="nm" style="font-size:.9rem">Pola nama file</label>
+    <input id="nm" type="text" value="{nama}" autocomplete="off" spellcheck="false" style="width:100%;border:1px solid var(--bd);border-radius:10px;background:var(--card);color:var(--tx);padding:9px 12px;font:inherit">
+    <div id="nmv" style="color:var(--mut);font-size:.8rem"></div>
+  </div>
+
   <div class="bar" style="margin-top:0">
     <div id="sum"></div>
     <div class="sp"></div>
+    <button class="btn g" id="folder" style="display:none">Pilih folder</button>
+    <button class="btn g" id="share" style="display:none" disabled>Bagikan</button>
     <button class="btn g" id="clr" disabled>Kosongkan</button>
     <button class="btn" id="zip" disabled>Unduh semua (ZIP)</button>
   </div>
   <div class="prog" id="prog"><i></i></div>
   <ul id="list"></ul>
-  <p class="sub" style="margin-top:24px;font-size:.8rem">Versi 10</p>
+  <p class="sub" style="margin-top:24px;font-size:.8rem">Versi 13</p>
 </main>
 
 <script>
@@ -89,6 +101,8 @@ li a{font-weight:600;font-size:.9rem;color:var(--ac);text-decoration:none;paddin
   var items=[], fmt="image/webp", ext="webp", quality=.85, gen=0, uid=0;
   var list=document.getElementById("list"), sum=document.getElementById("sum");
   var zipBtn=document.getElementById("zip"), clrBtn=document.getElementById("clr");
+  var shareBtn=document.getElementById("share"), folderBtn=document.getElementById("folder");
+  var dirHandle=null, note="", nt=null;
   var prog=document.getElementById("prog"), bar=prog.firstElementChild;
   var BUDGET=8*1048576, CHUNK=120*1048576;
 
@@ -198,19 +212,93 @@ li a{font-weight:600;font-size:.9rem;color:var(--ac);text-decoration:none;paddin
     if(g===gen){setTimeout(function(){if(g===gen)prog.style.visibility="hidden"},400);updateUI()}
   }
 
-  function outName(it){return baseName(it.file.name)+"."+ext}
+  var nmIn=document.getElementById("nm"), nmv=document.getElementById("nmv");
+  try{var sv=localStorage.getItem("konverter-nama");if(sv)nmIn.value=sv}catch(e){}
 
-  function saveBlob(blob,name){
+  // Pola: {nama} nama asli, {no} nomor urut, {tanggal} YYYY-MM-DD, {jam} HHMM
+  function buildName(pat,orig,no,total){
+    var d=new Date(),p2=function(n){return(n<10?"0":"")+n};
+    var tgl=d.getFullYear()+"-"+p2(d.getMonth()+1)+"-"+p2(d.getDate());
+    var jam=p2(d.getHours())+p2(d.getMinutes());
+    var w=String(total).length,nn=String(no);while(nn.length<w)nn="0"+nn;
+    var r=(pat||"{nama}").replace(/\{nama\}/g,baseName(orig)).replace(/\{no\}/g,nn)
+      .replace(/\{tanggal\}/g,tgl).replace(/\{jam\}/g,jam)
+      .replace(/[\\\/:*?"<>|]/g,"-").replace(/^[\s.]+|[\s.]+$/g,"");
+    return(r||"gambar")+"."+ext;
+  }
+  function outName(it){
+    var i=items.indexOf(it);
+    return buildName(nmIn.value,it.file.name,(i<0?0:i)+1,Math.max(items.length,1));
+  }
+  function nmPreview(){
+    var f=items.length?items[0].file.name:"foto.heic";
+    nmv.textContent="Contoh: "+buildName(nmIn.value,f,1,Math.max(items.length,1))+"   ({nama} {no} {tanggal} {jam})";
+  }
+  nmIn.addEventListener("input",function(){
+    try{localStorage.setItem("konverter-nama",nmIn.value)}catch(e){}
+    nmPreview();scheduleRefresh();
+  });
+
+  function flash(t){
+    note=t;sum.textContent=t;clearTimeout(nt);
+    nt=setTimeout(function(){note="";updateUI()},4500);
+  }
+
+  function dlBlob(blob,name){
     var u=URL.createObjectURL(blob),a=document.createElement("a");
     a.href=u;a.download=name;document.body.appendChild(a);a.click();a.remove();
     setTimeout(function(){URL.revokeObjectURL(u)},8000);
   }
 
+  // Nama unik di dalam folder pilihan agar file lama tidak tertimpa
+  async function uniqueIn(dir,name){
+    var m=name.match(/^(.*?)(\.[^.]*)?$/),base=m[1],dot=m[2]||"",n=name,i=0;
+    while(true){
+      try{await dir.getFileHandle(n);i++;n=base+" ("+i+")"+dot}
+      catch(e){return n}
+    }
+  }
+
+  async function saveBlob(blob,name){
+    if(dirHandle){
+      try{
+        var fh=await dirHandle.getFileHandle(await uniqueIn(dirHandle,name),{create:true});
+        var w=await fh.createWritable();await w.write(blob);await w.close();
+        return;
+      }catch(e){
+        dirHandle=null;folderBtn.textContent="Pilih folder";
+        flash("Folder tidak bisa ditulis, memakai unduhan biasa.");
+      }
+    }
+    dlBlob(blob,name);
+  }
+
+  // Urutan daftar = urutan nomor {no} dan urutan di ZIP
+  var rt=null;
+  function refreshOrder(){
+    items.forEach(function(it,i){
+      if(!it.li)return;
+      it.li.querySelector(".up").disabled=i===0;
+      it.li.querySelector(".dn").disabled=i===items.length-1;
+      it.li.querySelector(".fn").textContent=it.state==="ok"?"\u2192 "+outName(it):"";
+    });
+  }
+  function scheduleRefresh(){clearTimeout(rt);rt=setTimeout(refreshOrder,80)}
+  function move(it,dir){
+    var i=items.indexOf(it),j=i+dir;
+    if(i<0||j<0||j>=items.length)return;
+    items.splice(i,1);items.splice(j,0,it);
+    items.forEach(function(x){if(x.li)list.appendChild(x.li)});
+    refreshOrder();
+  }
+
   function render(it){
     if(!it.li){
       it.li=document.createElement("li");
-      it.li.innerHTML='<img alt=""><div class="in"><div class="nm"></div><div class="st"></div></div>';
+      it.li.innerHTML='<img alt=""><div class="in"><div class="nm"></div><div class="st"></div><div class="fn"></div></div><span class="mv"><button type="button" class="up" aria-label="Naikkan">&#9650;</button><button type="button" class="dn" aria-label="Turunkan">&#9660;</button></span>';
       it.li.querySelector(".nm").textContent=it.file.name;
+      it.li.querySelector(".up").addEventListener("click",function(){move(it,-1)});
+      it.li.querySelector(".dn").addEventListener("click",function(){move(it,1)});
       list.appendChild(it.li);
     }
     var st=it.li.querySelector(".st"),a=it.li.querySelector("a");
@@ -237,8 +325,8 @@ li a{font-weight:600;font-size:.9rem;color:var(--ac);text-decoration:none;paddin
 
   function updateUI(){
     var ok=items.filter(function(i){return i.state==="ok"}).length;
-    zipBtn.disabled=!ok;clrBtn.disabled=!items.length;
-    sum.textContent=items.length?ok+" dari "+items.length+" selesai":"";
+    zipBtn.disabled=!ok;clrBtn.disabled=!items.length;shareBtn.disabled=!ok;nmPreview();scheduleRefresh();
+    sum.textContent=note||(items.length?ok+" dari "+items.length+" selesai":"");
   }
 
   function add(files){
@@ -311,7 +399,16 @@ li a{font-weight:600;font-size:.9rem;color:var(--ac);text-decoration:none;paddin
     if(!ready.length)return;
     zipBtn.disabled=true;
     try{
-      if(ready.length===1){var b=await getOut(ready[0]);if(b)saveBlob(b,outName(ready[0]));return}
+      if(ready.length===1){var b=await getOut(ready[0]);if(b)await saveBlob(b,outName(ready[0]));return}
+      if(dirHandle){
+        var dn=dirHandle.name;
+        for(var j=0;j<ready.length;j++){
+          sum.textContent="Menyimpan "+(j+1)+" dari "+ready.length+"…";
+          var fb2=await getOut(ready[j]);if(fb2)await saveBlob(fb2,outName(ready[j]));
+        }
+        if(dirHandle)flash(ready.length+" file tersimpan di folder "+dn+".");
+        return;
+      }
       var groups=[],cur=[],acc=0;
       ready.forEach(function(it){
         if(cur.length&&acc+it.size>CHUNK){groups.push(cur);cur=[];acc=0}
@@ -322,15 +419,59 @@ li a{font-weight:600;font-size:.9rem;color:var(--ac);text-decoration:none;paddin
       for(var i=0;i<groups.length;i++){
         sum.textContent="Membuat ZIP "+(i+1)+" dari "+groups.length+"…";
         var zb=await buildZip(groups[i],used);
-        saveBlob(zb,"gambar-"+ext+(groups.length>1?"-"+(i+1):"")+".zip");
+        dlBlob(zb,"gambar-"+ext+(groups.length>1?"-"+(i+1):"")+".zip");
         await pause(900);
       }
     }catch(e){
-      sum.textContent="ZIP gagal dibuat. Coba unduh satuan.";
+      flash("Gagal. Coba unduh satuan.");
     }finally{
       zipBtn.disabled=false;updateUI();
     }
   });
+
+  // Pilih folder tujuan (Chrome/Edge desktop)
+  if("showDirectoryPicker" in window){
+    folderBtn.style.display="";
+    folderBtn.addEventListener("click",async function(){
+      try{
+        dirHandle=await window.showDirectoryPicker({mode:"readwrite"});
+        folderBtn.textContent="Folder: "+dirHandle.name;
+      }catch(e){
+        if(e&&e.name!=="AbortError")flash("Folder tidak bisa dipilih.");
+      }
+    });
+  }
+
+  // Bagikan ke Files, Drive, WhatsApp, dll. (HP)
+  var canShare=false;
+  try{
+    canShare=!!(navigator.share&&navigator.canShare&&navigator.canShare({files:[new File([""],"a.jpg",{type:"image/jpeg"})]}));
+  }catch(e){}
+  if(canShare){
+    shareBtn.style.display="";
+    shareBtn.addEventListener("click",async function(){
+      var ready=items.filter(function(i){return i.state==="ok"});
+      if(!ready.length)return;
+      shareBtn.disabled=true;
+      try{
+        var files=[],used={};
+        for(var i=0;i<ready.length;i++){
+          var b=await getOut(ready[i]);if(!b)continue;
+          var nm=outName(ready[i]),cnt=used[nm]||0;
+          used[nm]=cnt+1;if(cnt)nm=baseName(nm)+" ("+cnt+")."+ext;
+          files.push(new File([b],nm,{type:b.type||fmt}));
+        }
+        if(!files.length||!navigator.canShare({files:files})){
+          flash("File terlalu banyak untuk dibagikan sekaligus. Pakai Unduh.");return;
+        }
+        await navigator.share({files:files});
+      }catch(e){
+        if(e&&e.name!=="AbortError")flash(e.name==="NotAllowedError"?"Ketuk Bagikan sekali lagi.":"Gagal membagikan.");
+      }finally{
+        updateUI();
+      }
+    });
+  }
 })();
 </script>
 <script>
